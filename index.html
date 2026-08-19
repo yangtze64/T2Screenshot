@@ -10,10 +10,11 @@
   <body>
     <div id="app"></div>
     <script>
-      // overlay 窗口默认黑色背景，避免白屏闪烁
+      // overlay 窗口使用透明背景（与 Tauri transparent=true 配合），
+      // 首帧透出实时桌面，避免出现黑/白闪屏。不要在此设置不透明背景。
       if (window.location.search.includes('overlay')) {
-        document.documentElement.style.background = '#000';
-        document.body.style.background = '#000';
+        document.documentElement.style.background = 'transparent';
+        document.body.style.background = 'transparent';
       }
     </script>
     <script type="module" src="/src/main.ts"></script>

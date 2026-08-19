@@ -72,7 +72,12 @@ onMounted(async () => {
         bgCanvas.value = canvas
       }
 
-      // 图片就绪后设置焦点
+      // 图片就绪后再显示窗口，避免空白帧闪黑屏；随后抢焦点
+      try {
+        await appWindow.show()
+      } catch (e) {
+        console.error('Failed to show overlay window:', e)
+      }
       try {
         await appWindow.setFocus()
       } catch (e) {
@@ -81,10 +86,14 @@ onMounted(async () => {
     }
     img.onerror = () => {
       console.error('Failed to load screenshot image')
+      // 图片加载失败，恢复主窗口并关闭 overlay，避免卡在空白状态
+      closeOverlay()
     }
     img.src = src
   } catch (e) {
     console.error('Failed to get pending capture:', e)
+    // 取截图失败，恢复主窗口并关闭 overlay
+    closeOverlay()
   }
 
   // 获取窗口列表（用于智能识别）
@@ -137,12 +146,16 @@ function handleKeyDown(e: KeyboardEvent) {
 }
 
 async function closeOverlay() {
+  // 先立即隐藏当前 overlay，避免残留；再由 Rust 侧安全地销毁窗口
   try {
-    // 关闭前先显示主窗口
-    await invoke('show_main_window')
-    await appWindow.destroy()
+    await appWindow.hide()
   } catch (e) {
-    console.error('Failed to close overlay:', e)
+    console.error('hide overlay failed:', e)
+  }
+  try {
+    await invoke('close_overlay')
+  } catch (e) {
+    console.error('close_overlay failed:', e)
   }
 }
 
@@ -164,23 +177,34 @@ async function confirmScreenshot() {
   const crop = buildCropRect()
   if (!crop) return
 
+  let ok = false
   try {
     await invoke('copy_to_clipboard', {
       imageBase64: captureResult.value.image_base64,
       crop: crop,
     })
+    ok = true
   } catch (e) {
     console.error('copy_to_clipboard error:', e)
-    alert('复制失败: ' + e)
-    return
   }
-  await closeOverlay()
+
+  // 无论成败都给出可见反馈（不再用 alert，因为 overlay 处于最顶层会盖住原生 alert）
+  showToast(ok ? '已复制到剪贴板' : '复制失败')
+  // 延迟关闭，让用户看清提示；overlay 随后由 Rust 安全销毁
+  setTimeout(() => { closeOverlay() }, 700)
 }
 
 async function saveScreenshot() {
   if (!selection.value || !captureResult.value) return
   const crop = buildCropRect()
   if (!crop) return
+
+  // 先隐藏 overlay（其窗口层级在菜单栏之上），否则原生「保存」对话框会被全屏 overlay 遮挡而无法交互
+  try {
+    await appWindow.hide()
+  } catch (e) {
+    console.error('hide overlay before save failed:', e)
+  }
 
   try {
     await invoke('save_screenshot_with_dialog', {
@@ -189,12 +213,24 @@ async function saveScreenshot() {
     })
   } catch (e) {
     console.error('save_screenshot_with_dialog error:', e)
-    // 用户取消不提示
-    if (String(e).includes('用户取消了保存')) return
-    alert('保存失败: ' + e)
+    // 用户取消或失败：把 overlay 重新显示出来，方便继续编辑或重试
+    try { await appWindow.show() } catch (_) {}
+    if (!String(e).includes('用户取消了保存')) {
+      showToast('保存失败: ' + String(e))
+    }
     return
   }
-  await closeOverlay()
+  // 保存成功，关闭 overlay（由 Rust 安全销毁窗口）
+  closeOverlay()
+}
+
+// 轻提示（复制/保存成功反馈）
+const toast = ref<string | null>(null)
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+function showToast(msg: string) {
+  toast.value = msg
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toast.value = null }, 1500)
 }
 
 // 检测鼠标是否在调整手柄上
@@ -382,8 +418,8 @@ function onMouseUp() {
       draggable="false"
     />
 
-    <!-- 半透明遮罩 (SVG mask 挖洞) -->
-    <svg class="absolute inset-0 w-full h-full pointer-events-none">
+    <!-- 半透明遮罩 (SVG mask 挖洞)，图片就绪前不绘制，避免透出黑/白底 -->
+    <svg v-if="imageLoaded" class="absolute inset-0 w-full h-full pointer-events-none">
       <defs>
         <mask id="overlay-mask">
           <rect x="0" y="0" width="100%" height="100%" fill="white" />
@@ -468,7 +504,7 @@ function onMouseUp() {
 
     <!-- 十字准线（未创建选区且无悬停窗口时显示） -->
     <svg
-      v-if="!selection && !hoveredWindow && dragMode === 'none' && mouseX >= 0"
+      v-if="imageLoaded && !selection && !hoveredWindow && dragMode === 'none' && mouseX >= 0"
       class="absolute inset-0 w-full h-full pointer-events-none z-40"
     >
       <line :x1="mouseX" y1="0" :x2="mouseX" :y2="screenHeight" stroke="rgba(26,115,232,0.5)" stroke-width="1" stroke-dasharray="4,4" />
@@ -497,5 +533,13 @@ function onMouseUp() {
       :scale-factor="captureResult?.scale_factor || 1"
       :visible="imageLoaded && mouseX >= 0"
     />
+
+    <!-- 轻提示（复制/保存反馈） -->
+    <div
+      v-if="toast"
+      class="absolute top-4 left-1/2 -translate-x-1/2 px-4 py-2 bg-black/75 text-white text-sm rounded-lg pointer-events-none z-50"
+    >
+      {{ toast }}
+    </div>
   </div>
 </template>

@@ -96,6 +96,8 @@ pub async fn save_screenshot_with_dialog(
         .map(|p| p.to_string())
         .unwrap_or_default();
 
+    eprintln!("[save_screenshot_with_dialog] dialog returned path: {:?}", file_path);
+
     if file_path.is_empty() {
         return Err("用户取消了保存".into());
     }
@@ -129,6 +131,11 @@ pub fn copy_to_clipboard(
     app.clipboard()
         .write_image(&tauri_img)
         .map_err(|e| format!("Failed to write to clipboard: {}", e))?;
+
+    eprintln!(
+        "[copy_to_clipboard] success: wrote {}x{} image to clipboard",
+        width, height
+    );
 
     Ok(())
 }
