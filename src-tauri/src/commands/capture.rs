@@ -55,8 +55,23 @@ fn do_capture_internal() -> Result<ScreenCaptureResult, String> {
 
     let image = monitor.capture_image().map_err(|e| format!("Failed to capture: {}", e))?;
 
-    // 通过图片实际像素与逻辑像素的比值计算 scale_factor
-    let scale_factor = image.width() as f64 / width as f64;
+    // 计算 scale_factor：
+    // - macOS：monitor.width() 返回逻辑像素，image 是物理像素，二者比值 = 真实 scale（Retina=2.0），可行；
+    // - Windows：monitor.width() 返回的是 EnumDisplaySettings 的物理像素，与 image 同为物理像素，
+    //   比值恒为 1.0，会丢失 DPI 缩放信息 → 坐标换算错位、overlay 窗口尺寸错误。
+    // 因此统一优先用 xcap 的 monitor.scale_factor()（权威 DPI 缩放），失败时再回退到比值。
+    let scale_factor = monitor
+        .scale_factor()
+        .map(|s| s as f64)
+        .unwrap_or_else(|_| image.width() as f64 / width as f64);
+    eprintln!(
+        "[do_capture] image={}x{}, monitor.wh={}x{}, scale_factor={}",
+        image.width(),
+        image.height(),
+        width,
+        height,
+        scale_factor
+    );
 
     // 获取包含程序坞在内的完整屏幕尺寸
     let (full_width, full_height) = get_full_screen_size(scale_factor);
@@ -98,12 +113,23 @@ fn get_full_screen_size(scale_factor: f64) -> (u32, u32) {
 
 #[cfg(not(target_os = "macos"))]
 fn get_full_screen_size(scale_factor: f64) -> (u32, u32) {
-    // 非 macOS 平台使用 xcap 的工作区尺寸
+    // Windows/Linux：monitor.width()/height() 返回物理像素，
+    // 而 Tauri 的 WebviewWindow::inner_size 期望逻辑像素。
+    // 若直接传物理像素，在 DPI 缩放下 overlay 窗口会比屏幕大（如 150% 时大 1.5 倍），
+    // 多出部分跑到屏幕外 → 用户看到「主窗口消失、overlay 也不可见」的假死现象。
+    // 故这里除以 scale_factor 换算成逻辑像素。
     match Monitor::from_point(0, 0) {
         Ok(monitor) => {
-            let w = monitor.width().unwrap_or(1920);
-            let h = monitor.height().unwrap_or(1080);
-            (w, h)
+            let pw = monitor.width().unwrap_or(1920) as f64;
+            let ph = monitor.height().unwrap_or(1080) as f64;
+            let sf = if scale_factor > 0.0 { scale_factor } else { 1.0 };
+            let lw = ((pw / sf).round() as u32).max(1);
+            let lh = ((ph / sf).round() as u32).max(1);
+            eprintln!(
+                "[get_full_screen_size] physical={}x{}, scale={}, logical={}x{}",
+                pw, ph, sf, lw, lh
+            );
+            (lw, lh)
         }
         Err(_) => (1920, 1080),
     }
